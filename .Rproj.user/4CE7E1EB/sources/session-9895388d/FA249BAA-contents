@@ -1,0 +1,467 @@
+library(pacman)
+pacman::p_load(tidyr, dplyr,readr,stringr,magrittr,
+               rvinecopulib,ggraph,
+               VineCopula, # for BiCopTau2Par
+               polycor) # for correlation function hector()
+setwd("~/Desktop/Lan's/TIC_RA/Simulation/simulation/")
+
+dt = read_csv('./Treatnow/treatnow_dandanLiu_request_080323.csv')
+
+dt %>% filter(SD_ordinal_day15==0)
+dt_CE = dt %>% dplyr::select(record_id,randomization,contains('15'))
+head(dt_CE)
+
+missing_rows = apply(dt_CE[,-(1:2)],1,\(x) sum(is.na(x)))
+dt_CE[missing_rows==7,] # 89 rows have all variables missing.
+ordinal_missing = dt_CE[is.na(dt_CE$SD_ordinal_day15),]
+ordinal_missing %>% as.data.frame 
+
+record_need_clarify = ordinal_missing[apply(ordinal_missing[,-(1:2)],1,\(x) sum(x,na.rm=T)) > 0,] 
+record_need_clarify %>% as.data.frame
+
+
+missing_rows[is.na(dt_CE$SD_ordinal_day15)]  
+dt_CE1 = dt_CE[missing_rows!=7,]
+# for death/alive, 1 is alive, 0 is death, 
+dt_CE1$sur_vital_status_day15[is.na(dt_CE1$sur_vital_status_day15)] = 1
+# except ordinal scale, all missing are assume 0.
+dt_CE1[,-3][is.na(dt_CE1[,-3])] = 0
+
+apply(dt_CE1 %>%  filter(is.na(SD_ordinal_day15)), 2,\(x) sum(is.na(x)))
+
+nrow(dt_CE1)
+sum(is.na(dt_CE1$SD_ordinal_day15))
+table(dt_CE1$SD_ordinal_day15)
+# 2   3   4   5   6   7 
+# 1   2   2  50  44 247 
+
+dt_CE1 %>% dplyr::select(hospital_day15:sur_vital_status_day15) %>% colMeans()
+# hospital_day15   usual_activity_day15     symptoms_any_day15 
+# 0.014005602            0.151260504            0.288515406 
+# oxygen_day15             vent_day15 sur_vital_status_day15 
+# 0.008403361            0.002801120            1.000000000 
+
+ComponentY = matrix(NA,nrow=nrow(dt_CE1),ncol=6)
+colnames(ComponentY ) = paste0('BinY',1:6)
+ComponentY = as.data.frame(ComponentY)
+ComponentY$ordinalY_orig = dt_CE1$SD_ordinal_day15
+nonNA_Y = ComponentY$ordinalY_orig[!is.na(ComponentY$ordinalY_orig)]
+ComponentY$ordinalY_orig[!is.na(ComponentY$ordinalY_orig)][nonNA_Y>=2 ] = nonNA_Y[nonNA_Y>=2 ] -1
+# 1. Death or not (1. Yes (Alive)
+#ComponentY[,1] = ifelse(dt_CE1$sur_vital_status_day15!=1,1,0) ### all alive, no death at all (let death be the event)
+# 1. (originally 2) Hospitalized (hospital_day1==1) and ventilation (vent_day1==1)
+ComponentY[,1] = ifelse( dt_CE1$hospital_day15==1 & dt_CE1$vent_day15==1 , 1, 0)
+# 2. (originally 3) Hospitalized and oxygen (oxygen_day1)
+ComponentY[,2] = ifelse( dt_CE1$hospital_day15==1 & dt_CE1$oxygen_day15==1 , 1, 0)
+# 3. (originally 4) Hospitalized and not oxygen
+ComponentY[,3] = ifelse( dt_CE1$hospital_day15==1 & dt_CE1$oxygen_day15==0  , 1, 0)
+# 4. (originally 5) Not hospitalized and symptoms (symptoms_any_day1==1) and limitation in activity (usual_activity_day1==1)
+ComponentY[,4] = ifelse( dt_CE1$hospital_day15!=1 & 
+                           dt_CE1$symptoms_any_day15==1 & 
+                           dt_CE1$usual_activity_day15==1, 1, 0)
+# 5. (originally 6) Not hospitalized with symptoms (has symptom 1) but with no limitation in activity (limited =0)
+ComponentY[,5] = ifelse(  dt_CE1$hospital_day15!=1 & 
+                            dt_CE1$symptoms_any_day15==1 & 
+                            dt_CE1$usual_activity_day15!=1, 1, 0)
+# 6. (originally 7)  Not hospitalized without symptoms nor limitation in activity 
+ComponentY[,6] = ifelse(  dt_CE1$hospital_day15!=1 & 
+                            dt_CE1$symptoms_any_day15!=1 & 
+                            dt_CE1$usual_activity_day15!=1, 1, 0)
+
+ComponentY[apply(ComponentY[,1:6],1,sum) > 1,] ## only one record the component are not exclusive
+# apply(ComponentY,1,\(x) sum(is.na(x)))
+# ComponentY[apply(ComponentY,1,\(x) sum(is.na(x)))!=0,]
+
+## assume 0 to all NA
+# ComponentY1 = apply(ComponentY[,-8],2,
+#                     function(x){
+#                       x[is.na(x)]=0
+#                       x} ) %>% cbind(ordinalY_orig=ComponentY$ordinalY_orig) %>% 
+#   as.data.frame()
+# 
+# ComponentY1[apply(ComponentY,1,\(x) sum(is.na(x)))!=0,]
+# 
+# ComponentY1[apply(ComponentY,1,\(x) sum(x[1:7],na.rm=T))>1,]
+ordinalY_new = rep(NA,nrow(ComponentY))
+ordinalY_new[ComponentY$BinY6==1] = 6
+ordinalY_new[ComponentY$BinY5==1] = 5
+ordinalY_new[ComponentY$BinY4==1] = 4
+ordinalY_new[ComponentY$BinY3==1] = 3
+ordinalY_new[ComponentY$BinY2==1] = 2
+ordinalY_new[ComponentY$BinY1==1] = 1
+#ordinalY_new[apply(ComponentY,1,\(x) sum(x[1:7],na.rm=T))==0] = 0 # no obs.
+ComponentY2 = cbind(ComponentY, ordinalY_new)
+
+
+
+dt_CE2 = cbind(dt_CE1, ordinalY_new)
+dt_CE2 
+
+## check, except for missing ones, all are the same as the original scale
+dt_CE2 %>% filter(!is.na(SD_ordinal_day15)) %>%
+     mutate(diff=SD_ordinal_day15-ordinalY_new) %>%
+     filter(diff!=1)
+# matched
+nrow(dt_CE2) # 357
+# true composite distribution
+table(dt_CE2$ordinalY_new)/nrow(dt_CE2) 
+# 1           2           3           4           5           6 
+# 0.002801120 0.005602241 0.005602241 0.145658263 0.134453782 0.705882353 
+new_dt = data.frame(X =ifelse(dt_CE2$randomization=='B',1,0) ,ordinalY_new=as.factor(ordinalY_new))
+p_load(rms)
+fit = lrm(ordinalY_new ~ X,data=new_dt)
+
+(est_beta_X = fit$coefficients['X'] %>% as.numeric)
+theta_R = max(0.01,-est_beta_X)
+n = length(ordinalY_new)
+pr =as.numeric(table(ordinalY_new)/n) # empirical distribution
+sum_cube = sum(pr^3)
+ 
+# A is the ratio between control and treatment (randomization: B is treatment, C is placebo)
+A = as.numeric(table(dt_CE2$randomization)[2]/table(dt_CE2$randomization)[1]) # 1
+mu_beta1 = theta_R*sqrt( A*n^3*(1-sum_cube) /3/(n+1)^2/(A+1)^2 ) - qnorm(.975)
+power_wh = pnorm(mu_beta1)
+power_wh # 0.059215
+
+theta_R_expected = log(1.75)
+power_wh_expected = pnorm(theta_R_expected*sqrt( A*n^3*(1-sum_cube) /3/(n+1)^2/(A+1)^2 ) - qnorm(.975))
+power_wh_expected # 0.6835198
+
+### get sample size
+ss = function(A=1,theta_R_expected = log(1.75),target_power,pr){
+  sum_cube = sum(pr^3)
+  n = (qnorm(.975)+qnorm(target_power) )^2/ theta_R_expected^2/ (A*(1-sum_cube) /3/(A+1)^2)
+  ceiling(n)
+  }
+
+ss(target_power=.8,pr=pr) # 468  with empirical distribution
+ss(target_power=.9,pr= as.numeric(table(ordinalY_new)/n))
+# 627
+
+## their SAP table
+placebo_proportions <- c(1, 3, 4, 3, 10, 24, 55)
+treatment_proportions <- c(0.6, 1.8, 2.4, 1.9, 6.6, 18.7, 68.1)
+
+library(Hmisc)
+marg_probs=(placebo_proportions+treatment_proportions )/200 
+marg_probs[7] = 0.615
+sum(marg_probs)
+ss(target_power=.9,pr= marg_probs) # same as Frank's function
+posamsize(p = marg_probs, odds.ratio =1.75, fraction = 0.5, 
+          alpha = 0.05, power = 0.9)
+
+
+
+
+## naive
+ss(target_power=.95,pr= rep(1/6,6))
+ss(target_power=.9,pr= rep(1/6,6))
+ss(target_power=.8,pr= rep(1/6,6))
+ss(target_power=.7,pr= rep(1/6,6))
+
+sum_cube_naive = (1/6)^3*6
+mu_beta1_naive = theta_R*sqrt( A*n^3*(1-sum_cube_naive) /3/(n+1)^2/(A+1)^2 ) - qnorm(.975)
+power_wh_naive = pnorm(mu_beta1_naive)
+power_wh_naive #0.07081456
+power_wh_naive_expected = pnorm(theta_R_expected*sqrt( A*n^3*(1-sum_cube_naive) /3/(n+1)^2/(A+1)^2 ) - qnorm(.975))
+power_wh_naive_expected # 0.8503361
+
+## our method:
+
+source('~/Desktop/TIC_RA/Simulation/simulation/cluster_VCO/VCO/VCOrdinal_PMF_functions.R')
+
+# get the empirical correlation
+biny_dt = as.matrix(dt_CE2%>% dplyr::select(hospital_day15:vent_day15))
+corr_mat = hetcor(biny_dt,std.err=F)$correlations
+cor(biny_dt, method = "kendall")
+##########
+# 1. Hospitalized (hospital_day15==1) and ventilation (vent_day15==1) [oxygen can be 0 or 1]
+hetcor(biny_dt[,c('hospital_day15','vent_day15')],std.err=F)
+corr_mat[1,5] # 0.4446941 
+
+### Assume High or Low correlation???  what we used in simulation
+# tau_list = list(
+# high = round(0.6 * c(1, (2/3)^(1:4)), 2),  # 0.60, 0.40, 0.27, 0.18, 0.12
+# low = round(0.2 * c(1, (2/3)^(1:4)), 2)   # 0.20, 0.13, 0.09, 0.06, 0.04
+# )
+
+Gauss_param_HC_TN = BiCopTau2Par(family=1,tau=.6) # 0.809017
+Gauss_param_LC_TN = BiCopTau2Par(family=1,tau=.2) # 0.309017
+
+colMeans(biny_dt[,c('hospital_day15','vent_day15')])
+
+# if nComp = 2, bivariate copula
+
+preval_all = colMeans(biny_dt)
+# hospital_day15 usual_activity_day15   symptoms_any_day15         oxygen_day15 
+# 0.014005602          0.151260504          0.288515406          0.008403361 
+# vent_day15 
+# 0.002801120 
+
+p1 = as.numeric(preval_all['hospital_day15'])
+p2 = as.numeric(preval_all['vent_day15'])                
+#corr_mat[1,5]
+
+# assume low corr 
+
+pmf1 = matrix(BiCop_PMF(p1,p2,parC= Gauss_param_LC_TN, #find_parC(p1,p2,rho=corr_mat[1,5]),
+                        specific_method='Gaussian',print=T
+                        ),nrow=1)
+colnames(pmf1) = sort(paste0('X',expand.grid(rep(list(0:1),2)) %>% 
+                                           apply(1,function(x) paste0(x,collapse=''))))
+pmf1
+
+pmf1[,'X11']
+# X11 
+# 0.0002677709 
+##########
+
+
+# 2. Hospitalized (hospital_day15==1) and oxygen (oxygen_day15==1) [vent can only be 0 or 1]
+hetcor(biny_dt[,c('hospital_day15','oxygen_day15')],std.err=F)
+corr_mat[1,4] # high corr
+p1 = as.numeric(preval_all['hospital_day15'])
+p2 = as.numeric(preval_all['oxygen_day15'])                
+
+pmf2 = matrix(BiCop_PMF(p1,p2,parC=Gauss_param_HC_TN,#find_parC(p1,p2,rho=corr_mat[1,4]),
+                        specific_method='Gaussian'),nrow=1)
+colnames(pmf2) = sort(paste0('X',expand.grid(rep(list(0:1),2)) %>% 
+                               apply(1,function(x) paste0(x,collapse=''))))
+pmf2
+
+pmf2[,'X11']
+# X11 
+# 0.00418656
+
+# 3. Hospitalized (hospital_day15==1) and not oxygen (oxygen_day15==0)
+hetcor(data.frame(hospital_day15=biny_dt[,'hospital_day15'],non_oxygen_day15=1-biny_dt[,'oxygen_day15']),std.err=F) # corr is just the negative of corr2.
+-corr_mat[1,4]
+
+pmf2[,'X10']
+# X10 
+# 0.009819042
+
+# hospital---symptoms---activity 
+# low corr between hospital---symptoms and hospital---activity
+# high corr between symptoms and activity
+
+# 4.X011  Not hospitalized (hospital_day15==0) and symptoms (symptoms_any_day15==1) and limitation in activity (usual_activity_day15==1)
+hetcor(data.frame(non_hospital_day15=1-biny_dt[,'hospital_day15'],
+                  biny_dt[,c('symptoms_any_day15','usual_activity_day15')]),std.err=F)
+
+corr_mat[c(1,3,2),c(1,3,2)]
+corr_mat[2,3]
+
+p1 = as.numeric(preval_all['symptoms_any_day15'])
+p2 = as.numeric(preval_all['usual_activity_day15'])    
+rho=corr_mat[2,3]
+q1 = 1-p1
+q2 = 1-p2
+## target C(p1,p2,parC), need to find parC by using eq.(2) from lin2021
+target = rho*sqrt(p1*q1*p2*q2)+p1*p2   
+if (method=='Gaussian'){
+  parC_list = (1:1e3)*.001
+}
+
+C_fun(p1,p2, method='Gaussian',parC=.96)
+
+try_get_target = sapply(parC_list, function(x) C_fun(p1,p2,
+                                                     method=method,parC=x)) 
+parC = parC_list[which.min(abs(try_get_target-target ))]
+parC = .99 # parC == 1 will produce error.
+
+
+          
+# hospital---symptoms---activity
+## hospital,activity | symptom
+SetupInfo = VCO_Initialize(nComp = 3,
+                           prev = as.numeric(preval_all[c('hospital_day15',
+                                                          'symptoms_any_day15',
+                                                          'usual_activity_day15')]),
+                           vine_type = 'D',
+                           method_list=c('Gaussian','Indep'),
+                           rho_list = NULL,
+                           param_list = list(c(Gauss_param_LC_TN,Gauss_param_HC_TN),
+                                             0)
+                             )
+### get multivariate binary joint distribution
+output = gen_jointpmf(SetupInfo)
+list_joint_pmf = output$list_joint_pmf
+jointpmf = output$jointpmf
+jointpmf
+
+jointpmf['X011',]
+# 0.1243809
+
+# 5. Not hospitalized (hospital_day15==0) with symptoms (symptoms_any_day15==1) but with no limitation in activity (usual_activity_day15==0)
+hetcor(data.frame(non_hospital_day15=1-biny_dt[,'hospital_day15'],
+                  non_symptoms_any_day15=biny_dt[,'symptoms_any_day15'],
+                  non_limitation_activity_day15=1-biny_dt[,'usual_activity_day15']),std.err=F)
+jointpmf['X010',]
+# 0.1558024
+
+# 6. Not hospitalized (hospital_day15==0) without symptoms  (symptoms_any_day15==0) nor limitation in activity (usual_activity_day15==0)
+hetcor(data.frame(non_hospital_day15=1-biny_dt[,'hospital_day15'],
+                  non_symptoms_any_day15=biny_dt[,'symptoms_any_day15'],
+                  non_limitation_activity_day15=1-biny_dt[,'usual_activity_day15']),std.err=F)
+jointpmf['X000',]
+# 0.6828152
+
+
+table(dt_CE2$ordinalY_new)/nrow(dt_CE2)
+# use our method
+VC_ordinal_dist = as.numeric(c(pmf1[,'X11'],pmf2[,'X11'],pmf2[,'X10'],
+                    jointpmf['X011',],jointpmf['X010',],jointpmf['X000',]))
+sort(VC_ordinal_dist -table(dt_CE2$ordinalY_new)/nrow(dt_CE2))
+
+VC_ordinal_dist
+
+sum(VC_ordinal_dist)
+
+# 3/3 compute power
+theta_R = log(1.75)
+wh_power(theta_R=log(1.75),n=nrow(dt_CE2), 
+         pr = VC_ordinal_dist,A=1)
+get_SS = function(target_power0,theta_R0,n0,pr0,A0){ 
+  # have to rename above arguments to be different from the argument names in wh_power
+  calc_power = wh_power(theta_R=theta_R0,n = n0, pr = pr0,A=A0)
+  calc_power-target_power0
+}
+### estimated sample size with 80\% and 90\% target power.
+uniroot(get_SS,lower=10,upper=1000,theta_R0=log(1.75),
+        pr0 =VC_ordinal_dist,A0=1 , target_power0=.8)$root
+# 447
+uniroot(get_SS,lower=10,upper=1000,theta_R0=log(1.75),
+        pr0 =VC_ordinal_dist,A0=1 , target_power0=.9)$root
+# 598
+
+### separate the binary composites into groups that exclusive of each other?
+## group1: 
+
+# 1. Hospitalized (hospital_day15==1) and ventilation (vent_day15==1) [oxygen can be 0 or 1]
+# 2. Hospitalized (hospital_day15==1) and oxygen (oxygen_day15==1) [vent can only be 0 or 1]
+
+### so need to get the joint distribution of binary composite 1 and 2.
+p1 = VC_ordinal_dist[1]
+p2 = VC_ordinal_dist[2]
+corr_mat12=hetcor(ComponentY[,1:2])$correlations #0.5757262
+
+pmf12 = matrix(BiCop_PMF(p1,p2,
+                         parC=find_parC(p1,p2,
+                                        rho=corr_mat12[1,2]),
+                         method='Gaussian'),nrow=1)
+colnames(pmf12) = sort(paste0('X',expand.grid(rep(list(0:1),2)) %>% 
+                               apply(1,function(x) paste0(x,collapse=''))))
+pmf12
+
+## category 1: X10 + X11
+### Hospitalized and ventilation = 1, Hospitalized and oxygen = 0 or 1 
+pmf12[,'X10']  + pmf12[,'X11'] 
+
+## category 2: X01
+### Hospitalized and ventilation = 0, Hospitalized and oxygen = 1 
+pmf12[,'X01']
+
+## group2: 
+# 3. Hospitalized (hospital_day15==1) and not oxygen (oxygen_day15==0) (vent can only be 0)
+
+## group3:  
+# 4. Not hospitalized (hospital_day15==0) and symptoms (symptoms_any_day15==1) and limitation in activity (usual_activity_day15==1)
+
+# group4:
+# 5. Not hospitalized (hospital_day15==0) with symptoms (symptoms_any_day15==1) but with no limitation in activity (usual_activity_day15==0)
+
+# group5:
+# 6. Not hospitalized (hospital_day15==0) without symptoms  (symptoms_any_day15==0) nor limitation in activity (usual_activity_day15==0)
+VC_ordinal_dist_final = as.numeric(c(pmf12[,'X10']  + pmf12[,'X11'] ,
+                                     pmf12[,'X01'],
+                                     pmf2[,'X10'],
+                               jointpmf['X011',],
+                               jointpmf['X010',],
+                               jointpmf['X000',]))
+VC_ordinal_dist_final
+sum(VC_ordinal_dist_final)
+VC_ordinal_dist
+table(dt_CE2$ordinalY_new)/nrow(dt_CE2)
+
+## power with VC_ordinal_dist_final
+(est_beta_X = fit$coefficients['X'] %>% as.numeric)
+theta_R = max(0.01,-est_beta_X)
+n = length(ordinalY_new)
+pr =VC_ordinal_dist_final
+sum_cube = sum(pr^3)
+# A is the ratio between control and treatment (randomization: B is treatment, C is placebo)
+A = as.numeric(table(dt_CE2$randomization)[2]/table(dt_CE2$randomization)[1])
+mu_beta1 = theta_R*sqrt( A*n^3*(1-sum_cube) /3/(n+1)^2/(A+1)^2 ) - qnorm(.975)
+power_VC = pnorm(mu_beta1)
+power_VC
+
+
+theta_R_expected = log(1.75)
+power_VC_expected = pnorm(theta_R_expected*sqrt( A*n^3*(1-sum_cube) /3/(n+1)^2/(A+1)^2 ) - qnorm(.975))
+power_VC_expected # 0.68347
+
+
+######### VC with assumption about component prevalence and correlation
+
+
+
+
+
+
+
+
+
+
+
+
+
+round(hetcor(ComponentY[,1:3])$correlations,4)
+
+SetupInfo = VCO_Initialize(nComp = 6,
+                           prev = VC_ordinal_dist,
+                           vine_type = 'D',
+                           method_list= c('Gaussian',rep('Indep',5),
+                           rho_list = c(.01,rep(NULL,5)), # change rho.
+                           param_list = param_list)
+### get multivariate binary joint distribution
+output = gen_jointpmf(SetupInfo)
+list_joint_pmf = output$list_joint_pmf
+jointpmf = output$jointpmf
+jointpmf 
+
+
+power_VC = 
+
+# use our method with assumption about the 
+
+
+
+
+# compare with naive method.
+SetupInfo = VCO_Initialize(nComp = nComp,
+                           prev = prev,
+                           vine_type = vine_type,
+                           method_list=method_list,
+                           rho_list = rho_list, # change rho.
+                           param_list = param_list)
+### get multivariate binary joint distribution
+output = gen_jointpmf(SetupInfo)
+list_joint_pmf = output$list_joint_pmf
+jointpmf = output$jointpmf
+jointpmf 
+
+
+
+VC_ordinal_mat = rbind(Ordinal_PMF(jointpmf,method='sum'),
+                       # component 6 least severe, 1 most severe
+                       Ordinal_PMF(jointpmf,method='order',
+                                   severity_score_increasing=6:1),    # the ordinal we get here: 5
+                       # component 1 least severe, 6 most severe
+                       Ordinal_PMF(jointpmf,method='order',
+                                   severity_score_increasing=1:6)) 
+VCOpower = whitehead_power(VC_ordinal_mat,
+                           est_coef_Xs,n=n1)  
+VCOpower 
+
+
